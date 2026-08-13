@@ -1,0 +1,11 @@
+{
+  "name": "telegram-monitor",
+  "description": "Wake Claude on Telegram messages via a background monitor",
+  "version": "1.0.0",
+  "author": {
+    "name": "claude-telegram-bridge"
+  },
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  }
+}

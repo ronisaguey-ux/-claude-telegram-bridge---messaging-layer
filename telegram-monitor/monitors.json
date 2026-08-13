@@ -1,0 +1,27 @@
+[
+  {
+    "name": "telegram-inbox",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/watch-inbox.sh",
+    "description": "Telegram inbox monitor"
+  },
+  {
+    "name": "backup-watch",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/watch-backup.sh",
+    "description": "rclone backup health monitor (errors + stalls)"
+  },
+  {
+    "name": "stack-watch",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/watch-stack.sh",
+    "description": "CLAUDE stack process monitor"
+  },
+  {
+    "name": "main-watch",
+    "command": "${CLAUDE_PLUGIN_ROOT}/bin/watch-main.sh",
+    "description": "Main session -> monitor messages"
+  },
+  {
+    "name": "responder-watch",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/watch-responder.sh",
+    "description": "auto-responder replies/escalations monitor"
+  }
+]
