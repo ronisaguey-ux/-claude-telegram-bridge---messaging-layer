@@ -83,6 +83,7 @@ def main():
                 outbox = load_json(OUTBOX_FILE)
                 outbox.append({"ts": datetime.now().isoformat(), "from": "claude",
                                "text": f"📥 #{rid}"})
+                outbox = outbox[-200:]  # 2026-08-20 (audit 7.7): ring-buffer cap — prune old delivered turns
                 save_json(OUTBOX_FILE, outbox)
                 log.info(f"ACK {rid[:10]}... -> {text[:60]}")
             if new_msgs:
