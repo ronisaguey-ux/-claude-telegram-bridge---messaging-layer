@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# session_heartbeat.sh — live context heartbeat for the CLAUDE always-on bot.
+# session_heartbeat.sh — live context heartbeat for the OCULUS always-on bot.
 #
 # Wired as PostToolUse / UserPromptSubmit / Stop hooks in ~/.claude/settings.json.
 # Every tool call, user prompt, and turn end in ANY claude session appends one
@@ -12,7 +12,7 @@
 # Must be fast (<100ms): jq + printf only. Never fails loudly.
 
 set -u
-HEARTBEAT="${AUDITS_PLANS_DIR:-$HOME/Roni_workspace/audits_plans}/claude_heartbeat.jsonl"
+HEARTBEAT="/home/roni/Roni_workspace/audits_plans/claude_heartbeat.jsonl"
 
 input=$(cat)
 

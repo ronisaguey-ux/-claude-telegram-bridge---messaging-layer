@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""
-Telegram 30-Digit Ack Daemon
-============================
+"""OCULUS Telegram 30-Digit Ack Daemon
+====================================
 User feature (2026-08-08): "as soon as I send a message, send a quick 30 digit
 randomized number sequence, and make sure its different everytime I send a
 message, so whenever I do I can see that its alive and ur actually gonna
@@ -16,11 +15,17 @@ SEND-ONLY (bun plugin owns getUpdates now). ts-tracked like the responder
 Usage:
   nohup python3 scripts/telegram_ack_daemon.py > /tmp/ack_daemon.log 2>&1 &
 """
-import json, os, random, sys, time, logging
+import json
+import os
+import secrets
+import sys
+import time
+import logging
 from datetime import datetime
 
-INBOX_PATH = os.getenv("AUDITS_PLANS_DIR",
-                       os.path.join(os.path.expanduser("~"), ".claude", "channels", "telegram"))
+from telegram_common.json_io import load_json, save_json  # Shared atomic I/O
+
+INBOX_PATH = os.getenv("AUDITS_PLANS_DIR", "/home/roni/Roni_workspace/audits_plans")
 INBOX_FILE = os.path.join(INBOX_PATH, "claude_inbox.json")
 OUTBOX_FILE = os.path.join(INBOX_PATH, "claude_outbox.json")
 STATE_FILE = os.path.join(INBOX_PATH, ".ack_daemon_state.json")
@@ -28,37 +33,23 @@ LOG_FILE = os.path.join(INBOX_PATH, "ack_daemon.log")
 POLL_INTERVAL = 1
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)])
+                    handlers=[logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'), logging.StreamHandler(sys.stdout)])
 log = logging.getLogger("ack_daemon")
-
-
-def load_json(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def save_json(path, data):
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    except Exception as e:
-        log.error(f"Failed to write {path}: {e}")
+# Ensure log file permissions are 0600
+if os.path.exists(LOG_FILE):
+    os.chmod(LOG_FILE, 0o600)
 
 
 def main():
-    log.info("=== Telegram 30-Digit Ack Daemon starting ===")
+    log.info("=== Oculus 30-Digit Ack Daemon starting ===")
     log.info(f"Inbox: {INBOX_FILE} | Outbox: {OUTBOX_FILE}")
     state = load_json(STATE_FILE)
     last_ts = state.get("last_seen_ts", "") if isinstance(state, dict) else ""
     if not last_ts:
         # Fresh start: baseline to the newest entry already in the inbox so we
         # never ack the existing ring-buffer backlog (500 entries = spam).
-        last_ts = max(((m.get("ts") or "") for m in load_json(INBOX_FILE)), default="")
+        inbox = load_json(INBOX_FILE)
+        last_ts = max(((m.get("ts") or "") for m in inbox), default="")
         log.info(f"Fresh start, baseline last_ts={last_ts}")
 
     while True:
@@ -79,13 +70,12 @@ def main():
                 text = (msg.get("text") or "").strip()
                 if not text:
                     continue
-                rid = ''.join(str(random.randint(0, 9)) for _ in range(30))
+                rid = ''.join(str(secrets.randbelow(10)) for _ in range(30))
                 outbox = load_json(OUTBOX_FILE)
                 outbox.append({"ts": datetime.now().isoformat(), "from": "claude",
                                "text": f"📥 #{rid}"})
-                outbox = outbox[-200:]  # 2026-08-20 (audit 7.7): ring-buffer cap — prune old delivered turns
                 save_json(OUTBOX_FILE, outbox)
-                log.info(f"ACK {rid[:10]}... -> {text[:60]}")
+                log.info(f"ACK {rid[:10]}... (message redacted for security)")
             if new_msgs:
                 last_ts = max((m.get("ts") or "") for m in new_msgs)
                 save_json(STATE_FILE, {"last_seen_ts": last_ts})

@@ -14,8 +14,8 @@
 # "/telegram-monitor/bin/" tier-0 rule protects it (the previous monitor was
 # SIGTERM'd twice — exit 143/144).
 
-INBOX="${AUDITS_PLANS_DIR:-$HOME/Roni_workspace/audits_plans}/claude_inbox.json"
-PY="${PYTHON:-python3}"
+INBOX="/home/roni/Roni_workspace/audits_plans/claude_inbox.json"
+PY="/home/roni/Roni_workspace/oculus/.venv-orch/bin/python"
 
 last=$("$PY" - "$INBOX" <<'PYEOF'
 import json, sys
@@ -34,14 +34,18 @@ try:
     msgs = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
-last = sys.argv[2]
-new = [m for m in msgs if (m.get('ts') or '') > last]
+last = str(sys.argv[2])
+new = [m for m in msgs if str(m.get('ts') or '') > last]
 if not new:
     sys.exit(0)
 for m in new:
-    text = (m.get('text') or '').replace('\n', ' ')
+    text = (str(m.get('text') or '')).replace('\n', ' ')
+    # 2026-08-17 (user rule): only /main messages are delivered anywhere;
+    # plain/other messages reach nobody.
+    if not text.startswith('/main'):
+        continue
     print(f"[telegram] {m.get('from', 'telegram')}: {text}")
-print("__LAST__" + max(m.get('ts', '') for m in new))
+print("__LAST__" + max(str(m.get('ts', '')) for m in new))
 PYEOF
   )
   if [ -n "$out" ]; then

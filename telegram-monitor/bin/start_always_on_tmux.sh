@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# start_always_on_tmux.sh — host the always-on CLAUDE Telegram monitor inside
+# start_always_on_tmux.sh — host the always-on OCULUS Telegram monitor inside
 # a detached tmux session so it survives VS Code being closed.
 #
 # Why: this Claude session normally lives in a VS Code terminal — closing VS
@@ -10,13 +10,13 @@
 # Usage:
 #   ./start_always_on_tmux.sh          # create + enter the tmux session
 #   ./start_always_on_tmux.sh bg       # create detached (no attach)
-#   tmux attach -t ${SESS}              # reattach any time
+#   tmux attach -t oculus              # reattach any time
 #   tmux ls                            # list sessions
 
 set -u
 
-SESS="${TMUX_SESSION:-main}"
-MON_DIR="${PLUGIN_DIR:-$HOME/.claude/plugins/telegram-monitor}"
+SESS="oculus"
+MON_DIR="/home/roni/Roni_workspace/oculus/scripts/telegram-monitor"
 
 if tmux has-session -t "$SESS" 2>/dev/null; then
   # Self-heal: if the tmux session exists but the claude process inside is
@@ -54,15 +54,15 @@ echo "OK  telegram bun-server watcher started."
 
 # 2026-08-06 (post-reboot fix): durable watchers in HOME (not /tmp — wiped at
 # boot). Actions still happen even when no harness Monitor is attached.
-nohup bash $HOME/vpn_watch.sh >> /tmp/vpn_watch.log 2>&1 &
-nohup bash $HOME/audit_heartbeat.sh >> /tmp/audit_heartbeat.log 2>&1 &
+nohup bash /home/roni/vpn_watch.sh >> /tmp/vpn_watch.log 2>&1 &
+nohup bash /home/roni/audit_heartbeat.sh >> /tmp/audit_heartbeat.log 2>&1 &
 echo "OK  vpn_watch + audit_heartbeat started (durable copies)."
 
 # 2026-08-07: claude_deadman — direct-send watchdog. If no claude session
 # answers the user within 10 min, it alerts via the bot API directly (works
 # with zero sessions alive), pokes the inbox, and auto-relaunches the main
 # session. flock'd, survives reboots via this auto-start.
-nohup bash $HOME/claude_deadman.sh >> /tmp/claude_deadman.log 2>&1 &
+nohup bash /home/roni/claude_deadman.sh >> /tmp/claude_deadman.log 2>&1 &
 echo "OK  claude_deadman started (direct-alert watchdog)."
 
 if [[ "${1:-}" != "bg" ]]; then
