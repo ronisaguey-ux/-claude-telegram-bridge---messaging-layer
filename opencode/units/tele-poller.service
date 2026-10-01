@@ -1,0 +1,13 @@
+[Unit]
+Description=Helpotronenvybot Telegram poller (long-poll, appends to clone_inbox.jsonl + wake stream)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=AUDITS_PLANS_DIR=/home/roni-saguey/claude_telegram/channels/telegram
+ExecStart=/usr/bin/python3 /home/roni/Roni_workspace/telebridge/tele_poller.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

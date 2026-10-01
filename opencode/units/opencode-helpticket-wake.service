@@ -1,0 +1,13 @@
+[Unit]
+Description=opencode help-ticket wake watcher (ticket row -> agent triage run)
+After=opencode-serve.service
+Requires=opencode-serve.service
+
+[Service]
+ExecStart=/usr/bin/python3 /home/roni-saguey/.local/bin/oc_helpticket_wake.py
+Restart=always
+RestartSec=5
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

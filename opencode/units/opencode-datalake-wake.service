@@ -1,0 +1,11 @@
+[Unit]
+Description=opencode datalake wake watcher (data lake / signup -> session injection)
+After=opencode-serve.service
+Requires=opencode-serve.service
+[Service]
+ExecStart=/home/roni-saguey/.local/bin/oc_datalake_wake.sh
+Restart=always
+RestartSec=5
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+[Install]
+WantedBy=default.target

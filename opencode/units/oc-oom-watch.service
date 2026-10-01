@@ -1,0 +1,21 @@
+[Unit]
+Description=OOM watcher — wakes the agent on kernel OOM-kill or memory pressure
+Documentation=file:///home/roni-saguey/.local/bin/oc_oom_watch.sh
+After=network.target
+
+[Service]
+Type=simple
+# Deliberately tiny (bash + awk over /proc). It must never become part of the
+# problem it reports, so it keeps a hard memory ceiling with no swap allowance
+# — if the box is thrashing it stays resident instead of being pushed out.
+ExecStart=/home/roni-saguey/.local/bin/oc_oom_watch.sh
+Restart=always
+RestartSec=10
+MemoryMax=64M
+MemorySwapMax=0
+Nice=5
+# The wake path needs bun on PATH and the serve on loopback; no network beyond it.
+Environment=PATH=/home/roni-saguey/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

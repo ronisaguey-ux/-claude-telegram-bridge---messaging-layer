@@ -68,6 +68,23 @@ python3 inbox_monitor.py &         # inbox watch + relay health alerts
 | `PYTHON` | watcher scripts | Python interpreter to use (default `python3`) |
 | `MONITORS_CONFIG_SHA256` | plugin `config_loader.py` | Integrity gate: sha256 of `monitors.json`; a mismatch fails closed |
 
+## The opencode side
+
+Everything above wakes a **Claude Code** session. The `opencode/` directory is the
+same messaging layer for an **opencode** session — receive, append to an inbox,
+wake — plus two capabilities the terminal-scraping path does not have, because
+opencode exposes an HTTP API:
+
+- **A wake lands mid-turn**, so an urgent message is seen between tool calls
+  rather than waiting for the current turn to end.
+- **`/interrupt <text>`** ends the running turn *including a tool that is still
+  executing*, then delivers the message. Without the abort the message queues
+  behind a five-minute command; with it, the next message is answered in seconds.
+
+See [`opencode/README.md`](opencode/README.md) for the components, the
+configuration variables and the two failure modes worth knowing (a `200` is not a
+delivery, and the v1 abort route is the one that works).
+
 ## Security notes
 
 - The plugin's `auth.py` validates every incoming message against an
