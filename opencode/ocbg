@@ -59,6 +59,10 @@ cmd_run() {
   # The runner is a FILE, not a command line: it must not be re-parsed by systemd.
   cat > "$jobdir/run.sh" <<RUNNER
 #!/usr/bin/env bash
+# ★ pipefail MATTERS HERE. The common shape is `heavy_cmd 2>&1 | tail -20`, and without pipefail
+# the job's exit status is TAIL's -- which is always 0. Measured: a pytest run that failed and
+# printed "no tests ran" reported exit=0, so a broken job looked like a clean success. With
+# pipefail the leftmost failure propagates and the wake tells the truth.
 set -uo pipefail
 cd "\$(cat '$jobdir/cwd' 2>/dev/null || echo '$PWD')" 2>/dev/null || cd "\$HOME"
 {
@@ -67,7 +71,7 @@ cd "\$(cat '$jobdir/cwd' 2>/dev/null || echo '$PWD')" 2>/dev/null || cd "\$HOME"
   echo "### cmd: $command"
   echo
 } > "$jobdir/log" 2>&1
-bash -c "$command" >> "$jobdir/log" 2>&1
+bash -o pipefail -c "$command" >> "$jobdir/log" 2>&1
 rc=\$?
 printf '%s' "\$rc" > "$jobdir/rc"
 echo "" >> "$jobdir/log"
