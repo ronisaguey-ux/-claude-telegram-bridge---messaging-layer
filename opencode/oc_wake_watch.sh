@@ -15,6 +15,10 @@ STATE="${OC_WAKE_STATE:-/tmp/oc_wake_line.no}"
 STATE_LOG="$HOME/.local/share/opencode/wake_delivery.log"
 GATE="$HOME/.local/bin/tele_inbox_gate.py"   # shared /main gate (2026-09-07)
 PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+# bun is NOT at ~/.local/bin/bun on this box -- it is ~/.bun/bin/bun. The
+# hardcoded path made every wake fail with "No such file or directory" while the
+# watcher still advanced its pointer, i.e. silent message loss. Resolve it.
+BUN="${BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
 
 if [ "${1:-}" = "--daemon" ]; then
   [ -f "/tmp/oc_wake_daemon.pid" ] && [ -d "/proc/$(cat /tmp/oc_wake_daemon.pid 2>/dev/null)" ] && { echo "already daemonized"; exit 0; }
@@ -158,14 +162,14 @@ while true; do
     # for that experiment; it is deliberately NOT the default.
     wake_ok=0
     if [ "${OC_WAKE_MODE:-async}" = "steer" ]; then
-      if timeout 30 "$HOME/.local/bin/bun" \
+      if timeout 30 "$BUN" \
            "$HOME/.local/lib/ocbridge/oc_send.js" "$WAKE_TEXT" --steer \
            >/dev/null 2>&1 < /dev/null; then
         wake_ok=1
         echo "$(date '+%F %T') steered (UNVERIFIED) for lines $((LAST+1))..${NOW}" >> "$STATE_LOG"
       fi
     fi
-    if [ "$wake_ok" = "0" ] && timeout 30 "$HOME/.local/bin/bun" \
+    if [ "$wake_ok" = "0" ] && timeout 30 "$BUN" \
          "$HOME/.local/lib/ocbridge/oc_send.js" "$WAKE_TEXT" --async \
          >/dev/null 2>&1 < /dev/null; then
       wake_ok=1

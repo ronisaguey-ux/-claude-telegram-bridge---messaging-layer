@@ -1,11 +1,16 @@
 [Unit]
 Description=opencode telegram wake watcher (inbox -> session injection)
-After=opencode-serve.service
+After=opencode-serve.service tele-poller.service
 Requires=opencode-serve.service
+
 [Service]
-ExecStart=/home/roni-saguey/.local/bin/oc_wake_watch.sh
+ExecStart=%h/.local/bin/oc_wake_watch.sh
 Restart=always
 RestartSec=5
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=OC_INBOX=/tmp/clone_inbox.jsonl
+Environment=OC_WAKE_MODE=async
+Environment=OC_WAKE_STATE=/tmp/oc_wake_line.no
+
 [Install]
 WantedBy=default.target

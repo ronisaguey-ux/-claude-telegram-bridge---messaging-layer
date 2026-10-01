@@ -5,15 +5,53 @@ and writes a wake line to /tmp/main_wake.log so the Claude Monitor fires.
 """
 import json, os, sys, time, urllib.request, urllib.parse
 
-TOKEN = [l.split("=", 1)[1].strip() for l in open("/home/roni/Roni_workspace/telebridge/bot.env")
-         if l.strip().startswith("TELEGRAM_BOT_TOKEN=")][0]
+
+def _read_token():
+    """Resolve the bot token WITHOUT hardcoding one machine's path.
+
+    Order: the environment (a systemd unit can carry it), then TELE_BOT_ENV, then
+    the two env files this box actually keeps a token in. The old code opened one
+    absolute path unconditionally, so on any other machine -- or after the token
+    moved -- the import raised FileNotFoundError and the poller never started.
+    A missing token is a startup FATAL, never a silent idle loop.
+    """
+    tok = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if tok:
+        return tok
+    for p in (os.environ.get("TELE_BOT_ENV", ""),
+              os.path.expanduser("~/telebridge/bot.env"),
+              os.path.expanduser("~/.config/oculus/orchestrator.env")):
+        if not p:
+            continue
+        try:
+            with open(os.path.expanduser(p)) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("TELEGRAM_BOT_TOKEN="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            continue
+    return ""
+
+
+TOKEN = _read_token()
+if not TOKEN:
+    sys.stderr.write("tele_poller: FATAL no TELEGRAM_BOT_TOKEN (env, TELE_BOT_ENV, "
+                     "~/telebridge/bot.env, ~/.config/oculus/orchestrator.env)\n")
+    sys.exit(1)
 API = f"https://api.telegram.org/bot{TOKEN}"
 # Pidfile for the monitors dashboard (reads /tmp/tele_poller.pid)
-with open("/tmp/tele_poller.pid", "w") as pf:
+with open(os.environ.get("TELE_POLLER_PID", "/tmp/tele_poller.pid"), "w") as pf:
     pf.write(str(os.getpid()))
+OFFSET_FILE = os.environ.get("TELE_OFFSET_FILE", "/tmp/tele_offset")
+# The opencode inbox: one JSON object PER LINE. oc_wake_watch.sh counts lines to
+# find new messages, so this must stay line-delimited -- the array inbox below is
+# for the Claude half of the bridge and is read whole.
+INBOX = os.environ.get("TELE_INBOX", "/tmp/clone_inbox.jsonl")
+WAKE_LOG = os.environ.get("TELE_WAKE_LOG", "/tmp/main_wake.log")
 offset = 0
-if os.path.exists("/tmp/tele_offset"):
-    offset = int(open("/tmp/tele_offset").read().strip() or 0)
+if os.path.exists(OFFSET_FILE):
+    offset = int(open(OFFSET_FILE).read().strip() or 0)
 
 # Repo-compatible inbox: the claude-telegram-bridge messaging layer
 # (inbox_wake.py / inbox_monitor.py / ack daemon) consumes claude_inbox.json,
@@ -21,25 +59,61 @@ if os.path.exists("/tmp/tele_offset"):
 AUDITS_DIR = os.getenv("AUDITS_PLANS_DIR",
                        os.path.join(os.path.expanduser("~"), ".claude", "channels", "telegram"))
 ARRAY_INBOX = os.path.join(AUDITS_DIR, "claude_inbox.json")
+# Extra array inbox: this box's main session watches claude_main_inbox.json, and
+# every other monitor (oom-watch, watchdog, deadman) appends to it too. Keeping it
+# fed means swapping the poller does not strand the existing consumers.
+MAIN_INBOX = os.environ.get("TELE_MAIN_INBOX",
+                            os.path.join(AUDITS_DIR, "claude_main_inbox.json"))
+
+
+def _append_json_array(path, rec, cap):
+    """Append one record to a JSON-array inbox, atomically and without ever
+    destroying the file it could not read.
+
+    ★ TWO BUGS FIXED HERE, both of the same shape -- a failed read silently
+    becoming "the inbox is empty" and then being written back:
+
+      1. `except Exception: arr = []` meant ANY read failure (a truncation, a
+         permission blip, a half-written file, or a JSON shape change) turned the
+         next append into a WRITE OF A ONE-ELEMENT ARRAY. The whole history is
+         gone, and the failure looks like a successful send. Measured on the
+         sibling `direct_tg_wake.py`: the main inbox went 502 entries -> 2 while
+         two writers raced. The rule is: a read that fails RAISES. Only a file
+         that genuinely does not exist starts a new array.
+      2. No lock, while this box has several appenders (this poller, oom-watch,
+         the watchdog, the deadman). A read-modify-write with no lock is a lost
+         update by construction -- the loser's entry vanishes.
+    """
+    import fcntl
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    lock_path = path + ".lock"
+    with open(lock_path, "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        if os.path.exists(path):
+            with open(path) as f:
+                arr = json.load(f)          # a corrupt file RAISES: never wipe it
+            if not isinstance(arr, list):
+                arr = arr.get("messages", []) if isinstance(arr, dict) else []
+        else:
+            arr = []
+        arr.append(rec)
+        if cap:
+            arr = arr[-cap:]
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(arr, f, indent=1)
+        os.replace(tmp, path)
 
 
 def append_array_inbox(rec):
-    """Append rec to the array inbox (CREATED empty on first run). Ring-buffer
-    cap of 500 like the old stack; atomic replace — this poller is the only
-    writer, wake/monitor only read."""
-    try:
-        with open(ARRAY_INBOX) as f:
-            arr = json.load(f)
-        if not isinstance(arr, list):
-            arr = []
-    except Exception:
-        arr = []
-    arr.append(rec)
-    arr = arr[-500:]
-    tmp = ARRAY_INBOX + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(arr, f)
-    os.replace(tmp, ARRAY_INBOX)
+    """Repo-compatible array inbox (the Claude half reads this), ring-capped."""
+    _append_json_array(ARRAY_INBOX, rec, 500)
+
+
+def append_main_inbox(rec):
+    """This box's main-session inbox. Uncapped: it is a shared log that other
+    monitors append to, and trimming it would silently drop their history."""
+    _append_json_array(MAIN_INBOX, rec, 0)
 
 
 if not os.path.exists(ARRAY_INBOX):
@@ -93,8 +167,22 @@ def api(method, params=None, timeout=60):
 # ─────────────────────────────────────────────────────────────────────────────
 INTERRUPT_FILE = "/tmp/oc_interrupt.txt"
 COOLDOWN_FILE = os.path.expanduser("~/.local/share/opencode/wake.last")
-OC_SEND = os.path.expanduser("~/.local/lib/ocbridge/oc_send.js")
-BUN = os.path.expanduser("~/.local/bin/bun")
+OC_SEND = os.environ.get("OC_SEND", os.path.expanduser("~/.local/lib/ocbridge/oc_send.js"))
+
+
+def _find_bun():
+    """bun is NOT at ~/.local/bin/bun on this box -- it is ~/.bun/bin/bun, and the
+    old hardcoded path made every wake a silent no-op (`No such file or
+    directory`) while still looking like a delivered one. Resolve it: PATH first,
+    then the real install, then the historical location."""
+    import shutil
+    return (shutil.which("bun")
+            or next((p for p in (os.path.expanduser("~/.bun/bin/bun"),
+                                 os.path.expanduser("~/.local/bin/bun")) if os.path.exists(p)), "")
+            or "bun")
+
+
+BUN = _find_bun()
 
 # Bob types it both ways; matching only the correct spelling would silently treat
 # a typo as an ordinary message, which is the opposite of what an urgent channel
@@ -158,8 +246,18 @@ def _interrupt_body(text):
 
 
 def _session_id():
-    """The opencode session this box wakes, from the same pointer oc_send.js uses."""
-    for p in (os.path.expanduser("~/.local/state/opencode/openbot_session"),):
+    """The opencode session this box wakes, from the same pointer oc_send.js uses.
+
+    ★ WITHOUT THIS POINTER AN INTERRUPT CANNOT ABORT. The wake would still land
+    (oc_send.js falls back to the newest session), so the message would arrive and
+    the feature would LOOK fine -- while the abort silently did nothing and the
+    running tool kept the turn occupied, which is precisely the "it went in the
+    queue" failure. XDG_STATE_HOME is honoured here because a systemd unit may set
+    it, and a marker written at one root must be findable at the other.
+    """
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    for p in (os.path.join(state, "opencode", "openbot_session"),
+              os.path.expanduser("~/.local/state/opencode/openbot_session")):
         try:
             sid = open(p).read().strip()
             if sid:
@@ -167,6 +265,9 @@ def _session_id():
         except Exception:
             pass
     return None
+
+
+OC_SERVE = os.environ.get("OC_SERVE", "http://127.0.0.1:4096")
 
 
 def abort_generation():
@@ -203,7 +304,7 @@ def abort_generation():
     # v1 abort FIRST: measured to kill the running tool AND end the turn. This is the Escape-Escape
     # path. It is the load-bearing call; everything below is a safety net.
     for path in (f"/session/{sid}/abort", f"/api/session/{sid}/interrupt"):
-        req = urllib.request.Request(f"http://127.0.0.1:4096{path}", method="POST")
+        req = urllib.request.Request(f"{OC_SERVE}{path}", method="POST")
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 out.append("%s->%d" % (path.rsplit("/", 2)[-2] or path, r.status))
@@ -477,7 +578,8 @@ def main():
             data = api("getUpdates", {"timeout": 50, "offset": offset, "allowed_updates": '["message"]'})
             for upd in data.get("result", []):
                 offset = max(offset, upd["update_id"] + 1)
-                open("/tmp/tele_offset", "w").write(str(offset))
+                with open(OFFSET_FILE, "w") as of:
+                    of.write(str(offset))
                 msg = upd.get("message") or {}
                 text = msg.get("text") or msg.get("caption") or ""
                 photo = msg.get("photo") or []
@@ -500,8 +602,15 @@ def main():
                         print(f"[tele] file download error: {e}", flush=True)
                 if not text.strip() and not saved:
                     continue
+                # ★ `from` IS THE SOURCE TAG, NOT THE SENDER'S NAME.
+                # It used to be `first_name` (e.g. "Roni"), which the shared /main
+                # gate reads as `obj.get("from")` and compares against "telegram".
+                # So every message was gated out and only an explicit "/main"
+                # prefix could wake the session -- the normal-message wake was
+                # silently dead. The sender's name is kept, under its own key.
                 rec = {"ts": msg.get("date"), "chat_id": str(msg.get("chat", {}).get("id")),
-                       "from": str(msg.get("from", {}).get("first_name", "?")), "text": text}
+                       "from": "telegram",
+                       "sender": str(msg.get("from", {}).get("first_name", "?")), "text": text}
                 if saved:
                     rec["file"] = saved
                     rec["text"] = (text + f" [file: {saved}]").strip()
@@ -513,10 +622,24 @@ def main():
                     rec["interrupt"] = True
                     if hit[2]:
                         rec["kill"] = True
-                with open("/tmp/clone_inbox.jsonl", "a") as f:
+                with open(INBOX, "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 append_array_inbox(rec)
-                with open("/tmp/main_wake.log", "a") as f:
+                # ── the main-session inbox, in ITS shape ─────────────────────
+                # Same record as /tmp/clone_inbox.jsonl, plus message_id (which the
+                # existing dedupe and every downstream consumer key on) and an
+                # ISO-8601 ts. Written AFTER the JSONL line so the opencode chain
+                # never depends on this succeeding.
+                try:
+                    append_main_inbox({
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(msg.get("date", time.time()))) + "Z",
+                        "message_id": msg.get("message_id", 0),
+                        "from": "telegram",
+                        "text": rec.get("text", ""),
+                    })
+                except Exception as e:
+                    print(f"[tele] main-inbox append failed: {e}", flush=True)
+                with open(WAKE_LOG, "a") as f:
                     f.write(f"tele-wake {os.getpid()} {time.strftime('%H:%M:%S')}\n")
                 # Fire AFTER the line is durably on disk: if the wake is lost the message
                 # still exists, and if the write fails we never claim to have taken it.

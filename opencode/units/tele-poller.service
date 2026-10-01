@@ -1,11 +1,17 @@
 [Unit]
-Description=Helpotronenvybot Telegram poller (long-poll, appends to clone_inbox.jsonl + wake stream)
-After=network-online.target
+Description=Telegram poller (long-poll -> clone_inbox.jsonl + array inbox + wake stream), /interrupt + /kill
+After=network-online.target opencode-serve.service
 
 [Service]
 Type=simple
-Environment=AUDITS_PLANS_DIR=/home/roni-saguey/claude_telegram/channels/telegram
-ExecStart=/usr/bin/python3 /home/roni/Roni_workspace/telebridge/tele_poller.py
+# AUDITS_PLANS_DIR is where the ARRAY inboxes live (claude_inbox.json +
+# claude_main_inbox.json). TELE_INBOX is the line-delimited inbox the wake
+# watcher reads. Both are env-overridable so nothing is pinned to one machine.
+Environment=AUDITS_PLANS_DIR=%h/audits_plans
+Environment=TELE_INBOX=/tmp/clone_inbox.jsonl
+Environment=TELE_WAKE_LOG=/tmp/main_wake.log
+Environment=OC_SERVE=http://127.0.0.1:4096
+ExecStart=/usr/bin/python3 %h/.local/lib/ocbridge/tele_poller.py
 Restart=always
 RestartSec=3
 
