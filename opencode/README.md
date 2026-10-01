@@ -17,6 +17,7 @@ token is ever stored in a file that is committed.
 | `oc_wake_watch.sh` | Watches the inbox and wakes the session on a new line, with a burst cooldown so a batch becomes one wake. |
 | `tg_send.sh` | One-argument outbound send. Prints the HTTP status code. |
 | `tg_send_checked.sh` | Wrapper over `tg_send.sh` that **reads the response body** and fails loudly. Use this one — see *Why the checked sender* below. |
+| `ocbg` | Run a command in the background under a systemd transient unit and **wake the session when it finishes**. The answer to "never run a heavy command in the foreground". |
 | `oc_datalake_wake.sh`, `oc_oom_watch.sh`, `oc_calendar_wake.py`, `oc_helpticket_wake.py` | The other watchers: data-lake submissions, memory pressure/OOM, due calendar notes, and new help tickets. Each is a systemd unit in `units/`. |
 | `units/` | The systemd user units that run the above, so the bridge survives a reboot instead of dying with the shell that started it. |
 

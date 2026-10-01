@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# ocbg — run a command in the background, survive this shell, and WAKE THE AGENT when it finishes.
+#
+# Owner ask (2026-09-30): *"give urself the ability to background commands, I see whenever u do a
+# heavy command u just run sleep for a while, find a way to let urself background commands and have
+# it just wake u up when its done, so u can continue working while it runs"*.
+#
+# ★ WHY A WRAPPER AND NOT A SHELL `&`. A plain `&` dies with the parent shell, which is why the
+# agent kept falling back to `sleep N`. This runs the job under a SYSTEMD TRANSIENT UNIT, so it
+# outlives the tool call, the turn, and the session -- and the unit itself sends the wake.
+#
+#   ocbg "<command>"            run it, wake on completion
+#   ocbg --label NAME "<cmd>"   name the job (default: a timestamp)
+#   ocbg --no-wake "<cmd>"      run silently
+#   ocbg list                   show known jobs and their state
+#   ocbg status <id>            state + exit code
+#   ocbg logs <id> [N]          last N lines (default 60)
+#   ocbg wait <id>              block until it finishes (for a deliberate join)
+#
+# Job state lives in $OCBG_DIR (default /tmp/ocbg).
+set -uo pipefail
+
+DIR="${OCBG_DIR:-/tmp/ocbg}"
+OC_SEND="${OC_SEND:-$HOME/.local/lib/ocbridge/oc_send.js}"
+BUN="${OCBG_BUN:-$HOME/.local/bin/bun}"
+mkdir -p "$DIR"
+
+_slug() { printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-' | cut -c1-40; }
+
+_wake() {
+  # Best-effort: a failed wake must never fail the job.
+  [ -x "$BUN" ] || return 0
+  [ -f "$OC_SEND" ] || return 0
+  "$BUN" "$OC_SEND" "$1" --async >/dev/null 2>&1 || true
+}
+
+cmd_run() {
+  local label="" wake=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --label) label="$2"; shift 2 ;;
+      --no-wake) wake=0; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
+  local command="$*"
+  [ -n "$command" ] || { echo "usage: ocbg [--label NAME] [--no-wake] \"<command>\" >&2"; exit 2; }
+
+  local ts id
+  ts="$(date +%Y%m%d-%H%M%S)"
+  id="${label:-job}-${ts}"
+  id="$(_slug "$id")"
+  local jobdir="$DIR/$id"
+  mkdir -p "$jobdir"
+  printf '%s\n' "$command" > "$jobdir/cmd"
+  printf '%s\n' "$id" > "$DIR/latest"
+
+  # The runner is a FILE, not a command line: it must not be re-parsed by systemd.
+  cat > "$jobdir/run.sh" <<RUNNER
+#!/usr/bin/env bash
+set -uo pipefail
+cd "\$(cat '$jobdir/cwd' 2>/dev/null || echo '$PWD')" 2>/dev/null || cd "\$HOME"
+{
+  echo "### ocbg id=$id started \$(date -Is)"
+  echo "### cwd \$(pwd)"
+  echo "### cmd: $command"
+  echo
+} > "$jobdir/log" 2>&1
+bash -c "$command" >> "$jobdir/log" 2>&1
+rc=\$?
+printf '%s' "\$rc" > "$jobdir/rc"
+echo "" >> "$jobdir/log"
+echo "### ocbg id=$id exit=\$rc finished \$(date -Is)" >> "$jobdir/log"
+RUNNER
+  chmod +x "$jobdir/run.sh"
+  printf '%s\n' "$PWD" > "$jobdir/cwd"
+
+  local unit="ocbg-$(echo "$id" | tr -c 'a-zA-Z0-9' '-' | cut -c1-40)"
+  systemd-run --user --unit="$unit" --collect \
+    --property=WorkingDirectory="$PWD" \
+    /bin/bash "$jobdir/run.sh" </dev/null >/dev/null 2>&1
+
+  sleep 1
+  if ! systemctl --user is-active "$unit" >/dev/null 2>&1; then
+    echo "ocbg: FAILED to start unit $unit" >&2
+    tail -5 "$jobdir/log" 2>/dev/null >&2
+    exit 1
+  fi
+
+  if [ "$wake" = "1" ]; then
+    # A watcher unit joins the job and wakes the session on its exit, so the wake survives even
+    # if this launcher process is long gone.
+    local wunit="ocbgw-$(echo "$id" | tr -c 'a-zA-Z0-9' '-' | cut -c1-40)"
+    cat > "$jobdir/watch.sh" <<WATCH
+#!/usr/bin/env bash
+for _ in \$(seq 1 5760); do           # 5760 * 30s = 48h ceiling
+  systemctl --user is-active "$unit" >/dev/null 2>&1 || break
+  sleep 30
+done
+# let the final log lines land
+sleep 2
+rc=\$(cat "$jobdir/rc" 2>/dev/null || echo '?')
+tail=\$(tail -n 12 "$jobdir/log" 2>/dev/null | sed 's/^/    /')
+"$BUN" "$OC_SEND" "✅ background job finished: $id (exit=\$rc)
+\$tail
+
+(full log: $jobdir/log ; cmd: ocbg logs $id)" --async >/dev/null 2>&1 || true
+WATCH
+    chmod +x "$jobdir/watch.sh"
+    systemd-run --user --unit="$wunit" --collect \
+      /bin/bash "$jobdir/watch.sh" </dev/null >/dev/null 2>&1
+  fi
+
+  echo "ocbg started"
+  echo "  id    : $id"
+  echo "  unit  : $unit"
+  echo "  log   : $jobdir/log"
+  echo "  logs  : ocbg logs $id"
+  echo "  status: ocbg status $id"
+}
+
+cmd_list() {
+  local found=0
+  for d in "$DIR"/*/; do
+    [ -d "$d" ] || continue
+    found=1
+    local id; id="$(basename "$d")"
+    local unit="ocbg-$(echo "$id" | tr -c 'a-zA-Z0-9' '-' | cut -c1-40)"
+    local state="done"
+    systemctl --user is-active "$unit" >/dev/null 2>&1 && state="RUNNING"
+    local rc=""; [ -f "$d/rc" ] && rc="rc=$(cat "$d/rc")"
+    printf '  %-42s %-8s %s\n' "$id" "$state" "$rc"
+  done
+  [ "$found" = "1" ] || echo "  (no jobs in $DIR)"
+}
+
+cmd_status() {
+  local id="$1" jobdir="$DIR/$1"
+  [ -d "$jobdir" ] || { echo "no such job: $id" >&2; exit 1; }
+  local unit="ocbg-$(echo "$id" | tr -c 'a-zA-Z0-9' '-' | cut -c1-40)"
+  if systemctl --user is-active "$unit" >/dev/null 2>&1; then echo "RUNNING"; else
+    echo "FINISHED exit=$(cat "$jobdir/rc" 2>/dev/null || echo '?')"; fi
+}
+
+cmd_logs() {
+  local id="$1" n="${2:-60}" jobdir="$DIR/$1"
+  [ -f "$jobdir/log" ] || { echo "no log for: $id" >&2; exit 1; }
+  tail -n "$n" "$jobdir/log"
+}
+
+cmd_wait() {
+  local id="$1" jobdir="$DIR/$1"
+  local unit="ocbg-$(echo "$id" | tr -c 'a-zA-Z0-9' '-' | cut -c1-40)"
+  while systemctl --user is-active "$unit" >/dev/null 2>&1; do sleep 5; done
+  echo "exit=$(cat "$jobdir/rc" 2>/dev/null || echo '?')"
+  tail -n 20 "$jobdir/log" 2>/dev/null
+}
+
+case "${1:-}" in
+  list)   shift; cmd_list ;;
+  status) shift; cmd_status "${1:?id required}" ;;
+  logs)   shift; cmd_logs "${1:?id required}" "${2:-60}" ;;
+  wait)   shift; cmd_wait "${1:?id required}" ;;
+  "")     echo "usage: ocbg [--label NAME] [--no-wake] \"<command>\" | list | status ID | logs ID [N] | wait ID" >&2; exit 2 ;;
+  *)      cmd_run "$@" ;;
+esac

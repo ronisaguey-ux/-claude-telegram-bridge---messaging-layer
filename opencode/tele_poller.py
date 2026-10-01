@@ -101,6 +101,48 @@ BUN = os.path.expanduser("~/.local/bin/bun")
 # must do.
 INTERRUPT_CMDS = ("/interrupt", "/interupt")
 
+# ★★★ /kill -- INTERRUPT *AND* FORCE-KILL (owner, 2026-09-30).
+#
+# Owner: *"add a new command called /kill that interupts and kills whatever ur running and wakes u
+# up to look at tele"*.
+#
+# ★ THE TWO COMMANDS DIFFER IN HOW HARD THEY STOP, and that difference is the whole feature:
+#   /interrupt  -- ends the current turn and DELIVERS the message. A long tool is TERMINATED
+#                  (SIGTERM, then SIGKILL) because that is the only way to free the turn in this
+#                  runtime; see sweep_running_commands(). A command that traps SIGTERM and keeps
+#                  running can survive the grace window.
+#   /kill       -- SIGKILL ONLY, immediately, and NO grace. Nothing gets to trap or clean up.
+#                  Use it when an interrupt did not take, or when the command must stop NOW.
+#
+# ⚠️ WHAT NEITHER CAN DO, MEASURED AND RESEARCHED, so it is not promised again:
+#   A running tool call CANNOT BE DETACHED AND LEFT ALIVE. opencode's bash tool spawns with
+#   `detached: true` and its abort finalizer signals the child; there is no mid-flight detach
+#   (feature request #33310 adds an opt-in `run_in_background` for commands started that way --
+#   it is deliberately NOT a detach). So "pause it and keep it running while you answer" is not
+#   available. The free-the-turn action is necessarily a stop.
+#   ⇒ The way to have a long command not block the turn at all is to never start it in the
+#   foreground: `ocbg "<command>"` runs it under a transient systemd unit and WAKES this session
+#   when it finishes. That is the backgrounding the owner asked for, and it is a launcher, not a
+#   detacher.
+KILL_CMDS = ("/kill",)
+
+
+def _command_body(text):
+    """Return (command, body, hard) for a recognised command word, else None.
+
+    Whole-word match for the same reason `_interrupt_body` uses one: `/killed it` must not be
+    read as a kill with the message "ed it".
+    """
+    s = text.strip()
+    low = s.lower()
+    for cmd in KILL_CMDS:
+        if low.startswith(cmd) and (len(s) == len(cmd) or s[len(cmd)].isspace()):
+            return cmd, s[len(cmd):].strip(), True
+    for cmd in INTERRUPT_CMDS:
+        if low.startswith(cmd) and (len(s) == len(cmd) or s[len(cmd)].isspace()):
+            return cmd, s[len(cmd):].strip(), False
+    return None
+
 
 def _interrupt_body(text):
     """Return the message with the command word stripped, or None if not a command.
@@ -111,14 +153,8 @@ def _interrupt_body(text):
     a message it did not mean to claim is worse than one that ignores it, so the
     command has to be followed by whitespace or the end of the line.
     """
-    s = text.strip()
-    low = s.lower()
-    for cmd in INTERRUPT_CMDS:
-        if low.startswith(cmd):
-            rest = s[len(cmd):]
-            if rest == "" or rest[0].isspace():
-                return rest.strip()
-    return None
+    hit = _command_body(text)
+    return hit[1] if hit else None
 
 
 def _session_id():
@@ -176,9 +212,12 @@ def abort_generation():
     return "ok " + " ".join(out)
 
 
-def fire_interrupt(body):
+def fire_interrupt(body, hard=False):
     """Priority wake for an urgent message. Never raises: a failure here must not
-    take the poller down, because the poller is the only thing receiving Telegram."""
+    take the poller down, because the poller is the only thing receiving Telegram.
+
+    `hard=True` is the `/kill` path -- SIGKILL with no grace, and the wake says so.
+    """
     import subprocess
     try:
         with open(INTERRUPT_FILE, "w") as f:
@@ -192,7 +231,7 @@ def fire_interrupt(body):
     except Exception as e:
         print(f"[tele] cooldown clear failed: {e}", flush=True)
     # 1. free the tool slot, 2. end the turn. BOTH, in this order -- see abort_generation().
-    killed = sweep_running_commands()
+    killed = sweep_running_commands(hard=hard)
     gen = abort_generation()
     # Own wake, carrying the content. Truncated: a long body does not survive
     # session.prompt, and a short signal that always arrives beats a long one
@@ -200,22 +239,25 @@ def fire_interrupt(body):
     head = (body or "").replace("\n", " ")[:400]
     extra = ""
     if killed:
-        extra = " [paused %d running command(s)]" % len(killed)
+        # ★ "paused" WAS A LIE AND IS GONE. These processes are TERMINATED, not suspended --
+        # SIGTERM then SIGKILL. Calling it "paused" described a behaviour the code does not have.
+        extra = " [killed %d running command(s)]" % len(killed)
     if gen.startswith("ok"):
         extra += " [turn aborted]"
-    wake = (f"⚡⚡ INTERRUPT — owner needs you NOW: {head}{extra}"
+    prefix = "⚡⚡⚡ KILL" if hard else "⚡⚡ INTERRUPT"
+    wake = (f"{prefix} — owner needs you NOW: {head}{extra}"
             f"\n(full text: {INTERRUPT_FILE} ; inbox: /tmp/clone_inbox.jsonl)")
     try:
         r = subprocess.run([BUN, OC_SEND, wake, "--async"], capture_output=True,
                            text=True, timeout=30, stdin=subprocess.DEVNULL)
         ok = "attempted" if r.returncode == 0 else f"rc={r.returncode}"
-        print(f"[tele] INTERRUPT wake {ok}: {body[:70]}", flush=True)
+        print(f"[tele] {'KILL' if hard else 'INTERRUPT'} wake {ok}: {body[:70]}", flush=True)
         with open(os.environ.get("OC_WAKE_LOG",
                                os.path.expanduser("~/.local/share/opencode/wake_delivery.log")), "a") as f:
-            f.write(f"{time.strftime('%F %T')} INTERRUPT wake {ok} "
-                    f"paused={len(killed)} gen={gen} :: {body[:120]}\n")
+            f.write(f"{time.strftime('%F %T')} {'KILL' if hard else 'INTERRUPT'} wake {ok} "
+                    f"killed={len(killed)} gen={gen} :: {body[:120]}\n")
     except Exception as e:
-        print(f"[tele] INTERRUPT wake failed: {e}", flush=True)
+        print(f"[tele] interrupt wake failed: {e}", flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,10 +327,38 @@ def _run(argv):
         return ""
 
 
-def sweep_running_commands(min_age_s=None, dry_run=False):
-    """SIGTERM (then SIGKILL) long-running shell tools under the opencode serve."""
+def _proc_dead(pid):
+    """True if the process is gone OR a zombie.
+
+    ★ `os.kill(pid, 0)` is NOT a liveness test: it succeeds on a ZOMBIE, which is a process that
+    has already been terminated and is only waiting to be reaped. Using it as "still alive" makes
+    a finished process look running and reports a force-kill that never happened.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            st = f.read().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return False
+    return st == "Z"
+
+
+def sweep_running_commands(min_age_s=None, dry_run=False, hard=False):
+    """SIGTERM (then SIGKILL) long-running shell tools under the opencode serve.
+
+    `hard=True` is the `/kill` path: SIGKILL straight away, no grace. Nothing gets to trap the
+    signal, so a command that ignores SIGTERM cannot survive it.
+    """
     import subprocess, time as _t
-    min_age = INTERRUPT_MIN_AGE_S if min_age_s is None else min_age_s
+    # ★ /kill means NOW. The age threshold exists so `/interrupt` does not terminate a command
+    # that is about to finish on its own, but an explicit kill request must not be filtered by it
+    # -- measured: a `sleep 150` fired at 5 s old was skipped and `killed=0` while the owner asked
+    # for it dead. `hard` therefore ignores the threshold unless one is passed explicitly.
+    if hard and min_age_s is None:
+        min_age = 0
+    else:
+        min_age = INTERRUPT_MIN_AGE_S if min_age_s is None else min_age_s
     serve = _serve_pid()
     if not serve:
         return []
@@ -342,36 +412,49 @@ def sweep_running_commands(min_age_s=None, dry_run=False):
         # not yield the turn, which is the entire point. A tool's bash child gets its own
         # pgid (verified: pgid==pid, separate from the serve's), so killpg takes the shell
         # and everything it started without touching the serve or the MCP servers.
+        sig = 9 if hard else 15
         try:
             pgid = os.getpgid(pid)
         except Exception:
             pgid = None
         try:
             if pgid and pgid != os.getpgrp():
-                os.killpg(pgid, 15)
+                os.killpg(pgid, sig)
             else:
-                os.kill(pid, 15)
+                os.kill(pid, sig)
         except Exception:
             pass
         out.append((pid, age, cmd))
-    # grace, then force anything that ignored the term
-    _t.sleep(2)
+    if hard:
+        # No grace at all on the /kill path: SIGKILL is already immediate and cannot be trapped.
+        _t.sleep(0.5)
+    else:
+        # grace, then force anything that ignored the term
+        _t.sleep(2)
     for pid, age, cmd in victims:
-        try:
-            os.kill(pid, 0)            # still alive?
-            try:
-                pgid = os.getpgid(pid)
-            except Exception:
-                pgid = None
-            if pgid and pgid != os.getpgrp():
-                os.killpg(pgid, 9)
+        if not hard:
+            # ★ `os.kill(pid, 0)` IS NOT A LIVENESS TEST -- it succeeds on a ZOMBIE (terminated,
+            # not yet reaped by its parent), so a process that died on the SIGTERM above would
+            # still look alive and get a pointless SIGKILL, and the log would claim a force-kill
+            # that never happened. Read the actual state instead: Z (and a missing /proc entry)
+            # both mean gone. Same lesson as the harness's isAlive() counting zombies.
+            if _proc_dead(pid):
+                cmd = cmd + " [exited on SIGTERM]"
             else:
-                os.kill(pid, 9)
-            cmd = cmd + " [SIGKILL]"
-        except Exception:
-            pass
-        print(f"[tele] INTERRUPT terminated pgid of pid={pid} age={age:.0f}s :: {cmd[:90]}",
-              flush=True)
+                try:
+                    pgid = os.getpgid(pid)
+                except Exception:
+                    pgid = None
+                try:
+                    if pgid and pgid != os.getpgrp():
+                        os.killpg(pgid, 9)
+                    else:
+                        os.kill(pid, 9)
+                    cmd = cmd + " [SIGKILL]"
+                except Exception:
+                    pass
+        print(f"[tele] {'KILL' if hard else 'INTERRUPT'} terminated pgid of pid={pid} "
+              f"age={age:.0f}s :: {cmd[:90]}", flush=True)
     if out:
         try:
             _wl = os.environ.get("OC_WAKE_LOG",
@@ -425,9 +508,11 @@ def main():
                 # ★ Mark the line BEFORE it is appended, so the record on disk says an
                 # interrupt happened even if the wake path below fails. The flag is additive:
                 # every existing consumer reads `from`/`text` and ignores unknown keys.
-                interrupt_body = _interrupt_body(text)
-                if interrupt_body is not None:
+                hit = _command_body(text)
+                if hit is not None:
                     rec["interrupt"] = True
+                    if hit[2]:
+                        rec["kill"] = True
                 with open("/tmp/clone_inbox.jsonl", "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 append_array_inbox(rec)
@@ -435,8 +520,8 @@ def main():
                     f.write(f"tele-wake {os.getpid()} {time.strftime('%H:%M:%S')}\n")
                 # Fire AFTER the line is durably on disk: if the wake is lost the message
                 # still exists, and if the write fails we never claim to have taken it.
-                if interrupt_body is not None:
-                    fire_interrupt(interrupt_body)
+                if hit is not None:
+                    fire_interrupt(hit[1], hard=hit[2])
                 print(f"[tele] {rec['from']}: {text[:60]}", flush=True)
         except Exception as e:
             print(f"[tele] poll error: {e}", flush=True)
